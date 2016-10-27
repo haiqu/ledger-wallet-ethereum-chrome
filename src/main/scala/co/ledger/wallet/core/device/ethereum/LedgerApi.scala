@@ -43,7 +43,8 @@ class LedgerApi(override val device: Device)
   extends LedgerCommonApiInterface
   with LedgerDerivationApi
   with LedgerBolosApi
-  with LedgerSignatureApi {
+  with LedgerSignatureApi
+  with LedgerEthereumAppApi {
   override implicit val ec: ExecutionContext = scala.concurrent.ExecutionContext.Implicits.global
   def walletIdentifier(): Future[String] = {
     derivePublicAddress(DerivationPath("44'/60'/0'/0'")).map {(result) =>
@@ -51,12 +52,16 @@ class LedgerApi(override val device: Device)
     }
   }
   def walletMetaPassword(): Future[String] = {
-    derivePublicAddress(DerivationPath("44'/60'/14'/5'/16")).map {(result) =>
-      HexUtils.encodeHex(result.publicKey)
+    if (_walletIdentifier.isEmpty || (_walletIdentifier.get.isCompleted && _walletIdentifier.get.value.get.isFailure)) {
+      _walletIdentifier = Some(derivePublicAddress(DerivationPath("44'/60'/14'/5'/16")).map {(result) =>
+        HexUtils.encodeHex(result.publicKey)
+      })
     }
+    _walletIdentifier.get
   }
 
   val uuid = UUID.randomUUID()
+  private var _walletIdentifier: Option[Future[String]] = None
 }
 
 object LedgerApi {

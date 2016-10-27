@@ -3,10 +3,11 @@ package co.ledger.wallet.web.ethereum.controllers.wallet
 import biz.enef.angulate.Module.RichModule
 import biz.enef.angulate.core.JQLite
 import biz.enef.angulate.{Controller, Scope}
+import co.ledger.wallet.core.device.ethereum.LedgerApi
 import co.ledger.wallet.core.wallet.ethereum.{Ether, EthereumAccount}
 import co.ledger.wallet.web.ethereum.components.{QrCodeScanner, SnackBar}
 import co.ledger.wallet.web.ethereum.core.utils.PermissionsHelper
-import co.ledger.wallet.web.ethereum.services.{SessionService, WindowService}
+import co.ledger.wallet.web.ethereum.services.{DeviceService, SessionService, WindowService}
 import org.scalajs.dom
 
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -48,6 +49,7 @@ class SendIndexController(override val windowService: WindowService,
                           $location: js.Dynamic,
                           $route: js.Dynamic,
                           override val sessionService: SessionService,
+                          val deviceService: DeviceService,
                           $element: JQLite,
                           override val $scope: Scope) extends Controller with WalletController{
 
@@ -55,15 +57,24 @@ class SendIndexController(override val windowService: WindowService,
 
   var address = ""
   var amount = ""
-  var gasLimit = 200000
+  var customGasLimit = ""
+  var data = ""
+
+  def gasLimit = if (!isInAdvancedMode) BigInt(21000) else Try(BigInt(customGasLimit)).getOrElse(BigInt(21000))
   private var _gasPrice = BigInt("21000000000")
   var gasPrice = _gasPrice.toString()
   var total = Ether(0).toBigInt.toString()
   val unit = sessionService.currentSession.get.chain.symbol
 
+  var isInAdvancedMode = false
+  val supportAdvancedMode = sessionService.currentSession.get.dongleAppVersion > "1.0.0"
+
   sessionService.currentSession.get.sessionPreferences.lift(SendIndexController.RestoreKey) foreach {(state) =>
     val restore = state.asInstanceOf[SendIndexController.RestoreState]
     address = restore.to
+    customGasLimit = restore.customGasLimit
+    isInAdvancedMode = restore.advancedMode
+    data = restore.data
     if (restore.amount.isSuccess)
       amount = restore.amount.get.toEther.toString()
   }
@@ -95,7 +106,7 @@ class SendIndexController(override val windowService: WindowService,
   }
 
   def computeTotal(): Ether = {
-    val t = getAmountInput().map((amount) => amount + (_gasPrice * 21000)).map(new Ether(_)).getOrElse(Ether(0))
+    val t = getAmountInput().map((amount) => amount + (_gasPrice * gasLimit)).map(new Ether(_)).getOrElse(Ether(0))
     total = t.toBigInt.toString()
     t
   }
@@ -135,20 +146,30 @@ class SendIndexController(override val windowService: WindowService,
         SnackBar.error("send.bad_amount_title", "send.bad_amount_message").show()
       } else if (recipient.isFailure) {
         SnackBar.error("send.bad_address_title", "send.bad_address_message").show()
+      } else if (isInAdvancedMode && Try(BigInt(customGasLimit)).isFailure) {
+        SnackBar.error("send.bad_limit_title", "send.bad_limit_message").show()
       } else {
         val isIban = true
-        val fees = BigInt(gasLimit)
+        val fees = gasLimit
         val gasPrice = _gasPrice
         println(s"Amount: $amount")
         println(s"Recipient: $address")
         println(s"Is IBAN: $isIban")
-        println(s"Fees: $fees")
+        println(s"Gas limit: $fees")
+        println(s"Data: $data")
         sessionService.currentSession.get.wallet.balance() foreach {(balance) =>
           if (computeTotal() > balance) {
             SnackBar.error("send.insufficient_funds_title", "send.insufficient_funds_message").show()
           } else {
-            $location.path(s"/send/${value.get.toString()}/to/$address/from/0/with/$fees/price/$gasPrice")
-            $scope.$apply()
+            deviceService.lastConnectedDevice().flatMap(LedgerApi(_).getAppConfiguration()) foreach {(conf) =>
+              if (data.nonEmpty && !conf.isArbitraryDataSignatureEnabled) {
+                SnackBar.error("send.enable_data_title", "send.enable_data_message").show()
+              } else {
+                println(s"/send/${value.get.toString()}/to/$address/from/0/with/$fees/price/$gasPrice/data/$data")
+                $location.path(s"/send/${value.get.toString()}/to/$address/from/0/with/$fees/price/$gasPrice/data/$data")
+                $scope.$apply()
+              }
+            }
           }
         }
       }
@@ -171,7 +192,13 @@ class SendIndexController(override val windowService: WindowService,
   $scope.$on("$destroy", {() =>
     val amount = Try((BigDecimal($element.find("#amount_input").asInstanceOf[JQLite].`val`().toString) * BigDecimal(10).pow(18)).toBigInt())
     val recipient = $element.find("#receiver_input").asInstanceOf[JQLite].`val`().toString
-    sessionService.currentSession.get.sessionPreferences(SendIndexController.RestoreKey) =  SendIndexController.RestoreState(amount.map(new Ether(_)), recipient)
+    sessionService.currentSession.get.sessionPreferences(SendIndexController.RestoreKey) =  SendIndexController.RestoreState(
+      amount.map(new Ether(_)),
+      recipient,
+      customGasLimit,
+      data,
+      isInAdvancedMode
+    )
   })
 }
 
@@ -179,5 +206,5 @@ object SendIndexController {
   def init(module: RichModule) = module.controllerOf[SendIndexController]("SendIndexController")
 
   val RestoreKey = "SendIndexController#Restore"
-  case class RestoreState(amount: Try[Ether], to: String)
+  case class RestoreState(amount: Try[Ether], to: String, customGasLimit: String, data: String, advancedMode: Boolean)
 }
